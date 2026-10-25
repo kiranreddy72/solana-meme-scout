@@ -214,6 +214,7 @@ const seen = new Set();
 const tokenInfo = new Map();
 const poolToMint = new Map();
 const liveAlertSent = new Set();
+const pendingPoolUpdates = new Map();
 const tradeStats = new Map();
 let stopping = false;
 let handled = 0;
@@ -235,7 +236,8 @@ socket.on("token_update", async update => {
   const mint = poolToMint.get(pool);
 
   if (!mint) {
-  console.log("Live update pool not mapped yet:", pool);
+  pendingPoolUpdates.set(pool, update);
+  console.log("Stored early live update for pool:", pool);
   return;
 }
 
@@ -301,6 +303,12 @@ socket.emit("subscribe", { mint }, ack => {
 
     if (pool) {
       poolToMint.set(pool, mint);
+      const pendingUpdate = pendingPoolUpdates.get(pool);
+
+if (pendingUpdate) {
+  pendingPoolUpdates.delete(pool);
+   console.log("Early update saved; replay handler not configured yet.");
+}
       console.log("Mapped pool to token:", pool, mint);
     }
   }
