@@ -235,9 +235,9 @@ socket.on("token_update", async update => {
   const mint = poolToMint.get(pool);
 
   if (!mint) {
-    console.log("Live update pool not mapped:", pool);
-    return;
-  }
+  console.log("Live update pool not mapped yet:", pool);
+  return;
+}
 
   const info = tokenInfo.get(mint) || {};
   const price = Number(update.priceUSD);
