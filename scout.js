@@ -211,6 +211,8 @@ const socket = io("https://sol.shrine.trade", {
 
 const seen = new Set();
 const tokenInfo = new Map();
+const poolToMint = new Map();
+const liveAlertSent = new Set();
 let stopping = false;
 let handled = 0;
 
@@ -224,19 +226,51 @@ socket.on("connect", () => {
 
 // Live stream updates can provide price and market-cap estimates.
 // These are separate from DexScreener's volume and transaction data.
-socket.on("token_update", update => {
-  if (!update) return;
+socket.on("token_update", async update => {
+  if (!update || stopping) return;
+
+  const pool = String(update.pool || "").replace(/^pool:/, "");
+  const mint = poolToMint.get(pool);
+
+  if (!mint) {
+    console.log("Live update pool not mapped:", pool);
+    return;
+  }
+
+  const info = tokenInfo.get(mint) || {};
+  const price = Number(update.priceUSD);
+  const marketCap = Number(update.mcapUSD);
 
   console.log(
-    "Live token update:",
-    update.mint || update.pool || "unknown pool",
-    "price USD:",
-    update.priceUSD ?? "unknown",
-    "market cap USD:",
-    update.mcapUSD ?? "unknown"
+    "Mapped live update:",
+    info.symbol,
+    "price USD:", price,
+    "market cap USD:", marketCap
   );
-});
 
+  if (liveAlertSent.has(mint)) return;
+  if (!Number.isFinite(price) || !Number.isFinite(marketCap) || marketCap <= 0) return;
+
+  liveAlertSent.add(mint);
+
+  try {
+    await sendTelegram(
+      `📈 LIVE TOKEN UPDATE\n\n` +
+      `Name: ${info.name || "Unknown"}\n` +
+      `Ticker: $${info.symbol || "Unknown"}\n` +
+      `Mint: ${mint}\n` +
+      `Live price: $${price.toFixed(10)}\n` +
+      `Live market cap estimate: $${Math.round(marketCap).toLocaleString("en-US")}\n\n` +
+      `Liquidity: Not verified\n` +
+      `24h volume: Not provided by this update\n\n` +
+      `https://pump.fun/coin/${mint}\n\n` +
+      `⚠️ Market cap does not prove liquidity or safety.`
+    );
+  } catch (error) {
+    console.error("Live update Telegram failed:", error.message);
+    liveAlertSent.delete(mint);
+  }
+});
 socket.on("new_token", async coin => {
   if (stopping || coin?.protocol !== "PUMPFUN" || !coin.mint) return;
   if (seen.has(coin.mint)) return;
@@ -254,9 +288,21 @@ socket.on("new_token", async coin => {
   console.log(`New token: ${symbol} (${mint})`);
 
   // Ask Shrine for live updates for this token.
-  socket.emit("subscribe", { mint }, ack => {
-    console.log("Token subscription response:", mint, ack || "no response");
-  });
+  
+socket.emit("subscribe", { mint }, ack => {
+  console.log("Token subscription response:", mint, ack || "no response");
+
+  if (ack?.ok) {
+    const pool = String(
+      ack.pool || (ack.room || "").replace(/^pool:/, "")
+    );
+
+    if (pool) {
+      poolToMint.set(pool, mint);
+      console.log("Mapped pool to token:", pool, mint);
+    }
+  }
+});
 
   const metadata = await getMetadata(coin.uri);
   const xLink = findXLink(metadata);
