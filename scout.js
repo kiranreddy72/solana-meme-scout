@@ -307,8 +307,7 @@ socket.emit("subscribe", { mint }, ack => {
 
 if (pendingUpdate) {
   pendingPoolUpdates.delete(pool);
-   console.log("Early update saved; replay handler not configured yet.");
-}
+console.log("Early live update discarded; replay not implemented.");}
       console.log("Mapped pool to token:", pool, mint);
     }
   }
