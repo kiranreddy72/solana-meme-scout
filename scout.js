@@ -193,7 +193,7 @@ function marketText(data) {
 `X search: https://x.com/search?q=${encodeURIComponent(info.symbol || mint)}&src=typed_query&f=live\n` +
 `Bubblemaps: https://app.bubblemaps.io/sol/token/${mint}\n` +
 `DEX Screener: https://dexscreener.com/solana/${mint}\n` +
-`Pump.fun: https://pump.fun/coin/${mint}\n\n` +]
+`Pump.fun: https://pump.fun/coin/${mint}\n`]
   }
 
   return [
