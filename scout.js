@@ -8,7 +8,11 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const MIN_LIQUIDITY_USD = 5000;
 const MIN_VOLUME_24H_USD = 1000;
 const MIN_BUYS_24H = 10;
+
 const RUN_MS = 4 * 60 * 1000;
+const RETRY_MS = 20000;
+const MAX_MARKET_ATTEMPTS = 6;
+const MAX_TOKENS_PER_RUN = 20;
 
 if (!BOT_TOKEN || !CHAT_ID) {
   throw new Error("Telegram secrets are missing.");
@@ -19,22 +23,24 @@ function getJson(url, timeout = 10000) {
     const req = https.get(url, {
       headers: { "User-Agent": "SolanaMemeScout/1.0" },
       timeout
-    }, (res) => {
+    }, res => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", chunk => body += chunk);
       res.on("end", () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          return reject(new Error(`HTTP ${res.statusCode}`));
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
         }
         try {
           resolve(JSON.parse(body));
         } catch {
-          reject(new Error("Invalid JSON response"));
+          reject(new Error("Invalid JSON"));
         }
       });
     });
-    req.on("timeout", () => req.destroy(new Error("Request timeout")));
+
+    req.on("timeout", () => req.destroy(new Error("Timeout")));
     req.on("error", reject);
   });
 }
@@ -57,14 +63,18 @@ function sendTelegram(message) {
       }
     }, res => {
       let body = "";
+      res.setEncoding("utf8");
       res.on("data", chunk => body += chunk);
       res.on("end", () => {
         try {
           const result = JSON.parse(body);
-          if (res.statusCode === 200 && result.ok) resolve();
-          else reject(new Error(`Telegram error: ${res.statusCode}`));
+          if (res.statusCode === 200 && result.ok) {
+            resolve();
+          } else {
+            reject(new Error(`Telegram HTTP ${res.statusCode}`));
+          }
         } catch {
-          reject(new Error(`Telegram HTTP ${res.statusCode}`));
+          reject(new Error("Invalid Telegram response"));
         }
       });
     });
@@ -77,8 +87,15 @@ function sendTelegram(message) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function money(value) {
+  return Number.isFinite(value)
+    ? "$" + Math.round(value).toLocaleString("en-US")
+    : "Not available yet";
+}
+
 async function getMetadata(uri) {
   if (!uri || !uri.startsWith("https://")) return {};
+
   try {
     return await getJson(uri, 7000);
   } catch {
@@ -86,52 +103,105 @@ async function getMetadata(uri) {
   }
 }
 
-function findSocials(meta) {
-  const links = Array.isArray(meta?.extensions)
-    ? meta.extensions
-    : [];
-
+function findXLink(meta) {
   const candidates = [
     meta?.twitter,
     meta?.x,
-    meta?.website,
-    meta?.telegram,
-    ...links.map(x => x?.url)
-  ].filter(x => typeof x === "string");
+    ...(Array.isArray(meta?.extensions)
+      ? meta.extensions.map(item => item?.url)
+      : [])
+  ].filter(value => typeof value === "string");
 
-  const xLink = candidates.find(x =>
-    /(^|\/\/)(www\.)?(x\.com|twitter\.com)\//i.test(x)
-  );
-
-  return xLink || null;
+  return candidates.find(value =>
+    /https?:\/\/(www\.)?(x\.com|twitter\.com)\//i.test(value)
+  ) || null;
 }
 
 async function getMarketData(mint) {
   const url =
     `https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(mint)}`;
 
-  // New launches may not have a visible pool immediately.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const pairs = await getJson(url);
-      if (Array.isArray(pairs) && pairs.length) {
-        const valid = pairs.filter(p => p.chainId === "solana");
-        valid.sort((a, b) =>
-          (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
-        );
-        if (valid.length) return valid[0];
-      }
-    } catch (error) {
-      console.log("Market lookup:", error.message);
-    }
-    if (attempt < 2) await sleep(8000);
+  try {
+    const pairs = await getJson(url);
+
+    if (!Array.isArray(pairs)) return null;
+
+    const validPairs = pairs.filter(pair =>
+      pair.chainId === "solana" &&
+      pair.baseToken?.address?.toLowerCase() === mint.toLowerCase()
+    );
+
+    validPairs.sort((a, b) =>
+      (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
+    );
+
+    return validPairs[0] || null;
+  } catch (error) {
+    console.log(`Market lookup for ${mint}: ${error.message}`);
+    return null;
   }
-  return null;
 }
 
-function money(n) {
-  if (!Number.isFinite(n)) return "unknown";
-  return "$" + Math.round(n).toLocaleString("en-US");
+function marketFields(pair) {
+  if (!pair) return null;
+
+  const liquidity = pair.liquidity?.usd;
+  const volume = pair.volume?.h24;
+  const buys = pair.txns?.h24?.buys;
+  const sells = pair.txns?.h24?.sells;
+  const marketCap = pair.marketCap ?? pair.fdv;
+
+  return {
+    liquidity,
+    volume,
+    buys,
+    sells,
+    marketCap,
+    price: Number(pair.priceUsd),
+    url: pair.url
+  };
+}
+
+function hasUsableMarketData(data) {
+  return data &&
+    Number.isFinite(data.liquidity) &&
+    Number.isFinite(data.volume) &&
+    Number.isFinite(data.buys);
+}
+
+function marketStatus(data) {
+  if (!hasUsableMarketData(data)) {
+    return "⚪ INSUFFICIENT MARKET DATA";
+  }
+
+  if (
+    data.liquidity < MIN_LIQUIDITY_USD ||
+    data.volume < MIN_VOLUME_24H_USD ||
+    data.buys < MIN_BUYS_24H
+  ) {
+    return "🔴 BELOW MARKET FILTERS";
+  }
+
+  return "🟡 CANDIDATE — RISK CHECK NOT COMPLETE";
+}
+
+function marketText(data) {
+  if (!data) {
+    return [
+      "Liquidity: Not available yet",
+      "24h volume: Not available yet",
+      "24h buys/sells: Not available yet",
+      "Market cap/FDV: Not available yet"
+    ].join("\n");
+  }
+
+  return [
+    `Liquidity: ${money(data.liquidity)}`,
+    `24h volume: ${money(data.volume)}`,
+    `24h buys/sells: ${data.buys ?? "Unknown"}/${data.sells ?? "Unknown"}`,
+    `Market cap/FDV: ${money(data.marketCap)}`,
+    `Price: ${money(data.price)}`
+  ].join("\n");
 }
 
 const socket = io("https://sol.shrine.trade", {
@@ -140,98 +210,135 @@ const socket = io("https://sol.shrine.trade", {
 });
 
 const seen = new Set();
+const tokenInfo = new Map();
 let stopping = false;
 let handled = 0;
 
 socket.on("connect", () => {
-  console.log("Connected to launch feed.");
+  console.log("Connected to Shrine launch feed.");
+
   socket.emit("subscribe_new_tokens", {
     protocols: ["PUMPFUN"]
   });
 });
 
+// Live stream updates can provide price and market-cap estimates.
+// These are separate from DexScreener's volume and transaction data.
+socket.on("token_update", update => {
+  if (!update) return;
+
+  console.log(
+    "Live token update:",
+    update.mint || update.pool || "unknown pool",
+    "price USD:",
+    update.priceUSD ?? "unknown",
+    "market cap USD:",
+    update.mcapUSD ?? "unknown"
+  );
+});
+
 socket.on("new_token", async coin => {
   if (stopping || coin?.protocol !== "PUMPFUN" || !coin.mint) return;
   if (seen.has(coin.mint)) return;
+  if (handled >= MAX_TOKENS_PER_RUN) return;
 
   seen.add(coin.mint);
   handled++;
-
-  // Keep concurrent event processing limited.
-  if (handled > 60) return;
 
   const mint = coin.mint;
   const name = String(coin.name || "Unknown").slice(0, 80);
   const symbol = String(coin.symbol || "Unknown").slice(0, 30);
 
-  console.log(`Checking ${symbol}: ${mint}`);
+  tokenInfo.set(mint, { name, symbol });
 
-  const [pair, metadata] = await Promise.all([
-    getMarketData(mint),
-    getMetadata(coin.uri)
-  ]);
+  console.log(`New token: ${symbol} (${mint})`);
 
-  const liquidity = pair?.liquidity?.usd;
-  const volume = pair?.volume?.h24;
-  const buys = pair?.txns?.h24?.buys;
-  const sells = pair?.txns?.h24?.sells;
-  const marketCap = pair?.marketCap ?? pair?.fdv;
-  const xLink = findSocials(metadata);
+  // Ask Shrine for live updates for this token.
+  socket.emit("subscribe", { mint }, ack => {
+    console.log("Token subscription response:", mint, ack || "no response");
+  });
 
-  const hasMarket = Number.isFinite(liquidity) &&
-    Number.isFinite(volume) &&
-    Number.isFinite(buys);
+  const metadata = await getMetadata(coin.uri);
+  const xLink = findXLink(metadata);
 
-  const marketPass = hasMarket &&
-    liquidity >= MIN_LIQUIDITY_USD &&
-    volume >= MIN_VOLUME_24H_USD &&
-    buys >= MIN_BUYS_24H;
-
-  // Strict cluster policy: no "approved" status without an actual review.
-  const status = !hasMarket
-    ? "⚪ INSUFFICIENT MARKET DATA"
-    : !marketPass
-      ? "🔴 BELOW MARKET FILTERS"
-      : "🟡 CANDIDATE — MANUAL RISK CHECK REQUIRED";
-
-  const message =
-    `🧭 SOLANA MEME SCOUT\n\n` +
-    `Name: ${name}\n` +
-    `Ticker: $${symbol}\n` +
-    `Mint: ${mint}\n\n` +
-    `${status}\n\n` +
-    `Liquidity: ${money(liquidity)}\n` +
-    `24h volume: ${money(volume)}\n` +
-    `24h buys/sells: ${buys ?? "unknown"}/${sells ?? "unknown"}\n` +
-    `Market cap/FDV: ${money(marketCap)}\n\n` +
-    `X link in metadata: ${xLink || "Not found"}\n` +
+  const links =
     `X search: https://x.com/search?q=${encodeURIComponent(symbol === "Unknown" ? mint : symbol)}&src=typed_query&f=live\n` +
     `Bubblemaps: https://app.bubblemaps.io/sol/token/${mint}\n` +
     `DEX Screener: https://dexscreener.com/solana/${mint}\n` +
-    `Pump.fun: https://pump.fun/coin/${mint}\n\n` +
-    `⚠️ X trend growth is NOT verified automatically.\n` +
-    `⚠️ Holder clusters are NOT verified automatically.\n` +
-    `Check creator/holder links, LP conditions and sellability before considering a trade.`;
+    `Pump.fun: https://pump.fun/coin/${mint}`;
 
+  // Send the launch alert immediately instead of waiting for market data.
   try {
-    await sendTelegram(message);
-    console.log(`Alert sent for ${symbol}`);
+    await sendTelegram(
+      `🆕 NEW PUMPFUN TOKEN\n\n` +
+      `Name: ${name}\n` +
+      `Ticker: $${symbol}\n` +
+      `Mint: ${mint}\n\n` +
+      `⚪ Market data pending\n\n` +
+      `X link in metadata: ${xLink || "Not found"}\n` +
+      `${links}\n\n` +
+      `X trend and holder clusters are not verified automatically.`
+    );
   } catch (error) {
-    console.error("Telegram send failed:", error.message);
+    console.error("Launch alert failed:", error.message);
   }
+
+  // Retry market data for about two minutes.
+  // If data becomes available, send a follow-up alert.
+  for (let attempt = 1; attempt <= MAX_MARKET_ATTEMPTS; attempt++) {
+    if (stopping) return;
+
+    if (attempt > 1) await sleep(RETRY_MS);
+    if (stopping) return;
+
+    const pair = await getMarketData(mint);
+    const data = marketFields(pair);
+
+    console.log(
+      `Market attempt ${attempt}/${MAX_MARKET_ATTEMPTS} for ${symbol}:`,
+      data ? JSON.stringify(data) : "no indexed pair"
+    );
+
+    if (!hasUsableMarketData(data)) continue;
+
+    const status = marketStatus(data);
+
+    try {
+      await sendTelegram(
+        `📊 MARKET DATA UPDATE\n\n` +
+        `Name: ${name}\n` +
+        `Ticker: $${symbol}\n` +
+        `Mint: ${mint}\n\n` +
+        `${status}\n\n` +
+        `${marketText(data)}\n\n` +
+        `Pair: ${data.url || "Not provided"}\n` +
+        `${links}\n\n` +
+        `⚠️ This is not a safety approval.\n` +
+        `⚠️ X trend growth and Bubblemaps clusters remain unverified.`
+      );
+
+      console.log(`Market update sent for ${symbol}`);
+    } catch (error) {
+      console.error("Market update alert failed:", error.message);
+    }
+
+    return;
+  }
+
+  console.log(`No usable market data during retry window: ${symbol}`);
 });
 
-socket.on("connect_error", error =>
-  console.error("Feed connection error:", error.message)
-);
+socket.on("connect_error", error => {
+  console.error("Feed connection error:", error.message);
+});
 
-socket.on("error", error =>
-  console.error("Feed error:", error.message || error)
-);
+socket.on("error", error => {
+  console.error("Feed error:", error.message || error);
+});
 
 setTimeout(() => {
   stopping = true;
   socket.disconnect();
-  console.log(`Finished. Tokens checked: ${handled}`);
+  console.log(`Finished. Tokens seen: ${handled}`);
   process.exit(0);
 }, RUN_MS);
