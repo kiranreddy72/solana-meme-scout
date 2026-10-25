@@ -11,7 +11,7 @@ const MIN_BUYS_24H = 10;
 
 const RUN_MS = 4 * 60 * 1000;
 const RETRY_MS = 20000;
-const MAX_MARKET_ATTEMPTS = 6;
+const MAX_MARKET_ATTEMPTS = 9;
 const MAX_TOKENS_PER_RUN = 20;
 
 if (!BOT_TOKEN || !CHAT_ID) {
