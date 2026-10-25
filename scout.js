@@ -214,6 +214,7 @@ const seen = new Set();
 const tokenInfo = new Map();
 const poolToMint = new Map();
 const liveAlertSent = new Set();
+const tradeStats = new Map();
 let stopping = false;
 let handled = 0;
 
