@@ -305,7 +305,6 @@ socket.emit("subscribe", { mint }, ack => {
     }
   }
 });
-
   const metadata = await getMetadata(coin.uri);
   const xLink = findXLink(metadata);
 
