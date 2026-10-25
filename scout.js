@@ -188,11 +188,12 @@ function marketStatus(data) {
 function marketText(data) {
   if (!data) {
     return [
-      "Liquidity: Not available yet",
-      "24h volume: Not available yet",
-      "24h buys/sells: Not available yet",
-      "Market cap/FDV: Not available yet"
-    ].join("\n");
+     `Liquidity: Not verified\n` +
+`24h volume: Not provided by this update\n\n` +
+`X search: https://x.com/search?q=${encodeURIComponent(info.symbol || mint)}&src=typed_query&f=live\n` +
+`Bubblemaps: https://app.bubblemaps.io/sol/token/${mint}\n` +
+`DEX Screener: https://dexscreener.com/solana/${mint}\n` +
+`Pump.fun: https://pump.fun/coin/${mint}\n\n` +]
   }
 
   return [
